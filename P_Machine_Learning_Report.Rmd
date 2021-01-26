@@ -1,0 +1,205 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "__Joyvalerie Mondejar__"
+date: _Last Updated:_ `r format(Sys.time(), '%B %d, %Y')`
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+_Date Created_: `r format(as.Date("2020-01-14"), "%B %d, %Y")`
+
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about
+personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of
+enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their
+behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular
+activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from
+accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts
+correctly and incorrectly in 5 different ways. More information is available from the website here:
+<http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(caret))
+suppressMessages(library(randomForest))
+library(rpart)
+suppressMessages(library(rpart.plot))
+suppressMessages(library(data.table))
+library(magrittr)
+suppressMessages(library(rattle))      # used to plot the classification trees
+library(here)
+```
+
+## Getting and Cleaning Data
+
+The training data for this project are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>.
+
+Loading data
+
+```{r}
+trainingSet <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testingSet <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+Cleaning Data
+
+```{r}
+# see error proportion
+NAProportion <- round(colMeans(is.na(trainingSet)), 2)
+head(NAProportion, 20)
+table(NAProportion)
+# 93 columns have complete data, while 67 columns have 98% missing data
+```
+
+```{r}
+# find index of the complete columns minus the first 7 columns since they seems (administrative data) to be not useful in predicting the outcome variable classe 
+index <- which(NAProportion == 0)[-c(1:7)]
+# subset the data
+trainData <- trainingSet[, index]
+testData <- testingSet[, index]
+dim(trainData)
+dim(testData)
+```
+
+```{r}
+remove_cols <- nearZeroVar(trainData)     # removed the 33 columns with near zero variance
+trainData <- trainData[, -remove_cols]
+testData <- testData[, -remove_cols]
+dim(trainData)
+dim(testData)
+trainData$classe <- as.factor(trainData$classe)
+```
+
+## Cross Validation
+
+We set `testData` aside and split the `trainData` into two parts. We will allocate 70% of the `trainData` to train the model on and 30% to validate it.
+
+```{r}
+set.seed(3475)
+inTrain <- createDataPartition(y = trainData$classe, p = 0.7, list = FALSE)
+trainData <- trainData[inTrain, ]
+validData <- trainData[-inTrain, ]
+rbind(trainData = dim(trainData), validData = dim(validData), test = dim(testData))
+```
+
+We will now train the data using the remaining 52 variables.
+
+## Model Building
+
+### Prediction with Classication Trees
+
+```{r decision-tree, cache=TRUE}
+decisionTreeMod <- train(classe ~ ., data = trainData, method = "rpart")  # constructs trees based on the outcome and predictors
+print(decisionTreeMod$finalModel)  # returns text summary of all nodes/spits in the constructed tree
+```
+
+```{r}
+# Plots the classification tree with all nodes/splits
+fancyRpartPlot(decisionTreeMod$finalModel)   # from rattle package
+```
+
+```{r}
+# use the model to predict on validation dataset
+predictTreeMod <- predict(decisionTreeMod, newdata = validData)
+# confusion matrix of predicted results
+cmtree <- confusionMatrix(predictTreeMod, validData$classe)
+cmtree
+```
+
+```{r}
+# plot matrix results
+plot(cmtree$table, col = cmtree$byClass, 
+     main = paste("Tree - Accuracy =", round(cmtree$overall['Accuracy'], 4)))
+```
+
+The decision tree has accuracy of 0.4998 and therefore the out-of-sample error 0.5002
+
+### Prediction using Random Forest
+
+```{r rf, cache=TRUE}
+# Fitting a random forest model
+set.seed(3475)
+controlRF <- trainControl(method = "cv", number = 10, verboseIter = FALSE)
+t1 <- Sys.time()
+rfMod <- train(classe ~ ., data = trainData, method = "rf", prox = TRUE, trControl = controlRF)
+rfMod
+t2 <- Sys.time()
+t2 - t1
+rfMod$finalModel
+```
+
+```{r}
+getTrainPerf(rfMod)
+```
+
+```{r}
+# predcition on testData
+predictRfMod <- predict(rfMod, newdata = validData)
+cmRf <-  confusionMatrix(predictRfMod, validData$classe)
+cmRf
+```
+
+The random forest model is better performing with accuracy of 1 and therefore the out-of-sample error rate is 0
+
+```{r}
+# plot matrix results
+plot(cmRf$table, col = cmRf$byClass, 
+     main = paste("Random Forest - Accuracy =",
+                  round(cmRf$overall['Accuracy'], 4)))
+```
+
+### Prediction using Generalized Boosted Model
+
+```{r gbm, cache=TRUE}
+set.seed(3475)
+controlGBM <- trainControl(method = "repeatedcv", number = 5, repeats = 1)
+t1 <- Sys.time()
+gbMod <- train(classe ~ ., data = trainData, method = "gbm", trControl = controlGBM, verbose = FALSE)
+t2 <- Sys.time()
+t2 - t1
+gbMod$finalModel
+```
+
+```{r}
+# prediction on validData
+predictgbMod <- predict(gbMod, newdata = validData)
+cmGb <- confusionMatrix(predictgbMod, validData$classe)
+cmGb
+```
+
+The generalized boosting model has accuracy of 0.98 and therefore the out-of-sample error is 0.02
+
+```{r}
+# plot matrix results
+plot(cmGb$table, col = cmGb$byClass, 
+     main = paste("GBM - Accuracy =", round(cmGb$overall['Accuracy'], 4)))
+```
+
+## Decision
+
+The accuracy of three classification models above are:  
+a. Decision Tree: 0.4998  
+b. Random Forest: 1  
+c. Generalized Boosted Model: ~0.98
+
+So, considering the model with the highest accuracy the Ramdom Forest model will be applied to predict the 20 different test cases.
+
+```{r}
+predictTest <- predict(rfMod, newdata = testData)
+predictTest
+```
+
+
+
